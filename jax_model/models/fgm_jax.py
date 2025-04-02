@@ -24,7 +24,7 @@ class Dense(nnx.Module):
 
 #This is a residual block of the fgm nn.
 class ResidualBlock(nnx.Module):
-    def __init__(self, in_c, growth_rate, layers, kernel_size=5):
+    def __init__(self, growth_rate, layers, kernel_size=5):
         super(ResidualBlock, self).__init__()
 
         #First conv layer. You don't need in_channels because of lazy load
@@ -58,4 +58,52 @@ class ResidualBlock(nnx.Module):
 
 #This is the main fgm model
 class FGM(nnx.Module):
-    def init
+    def __init__(self, in_c, out_c, kernel_size=5):
+        super(FGM, self).__init__()
+        self.conv1 = nnx.Conv(
+            features=out_c,
+            kernel_size=(kernel_size, kernel_size),
+            strides=(1, 1),
+            padding='SAME',
+            use_bias=True,
+        )
+
+        self.res_block1 = nnx.Sequential([
+            ResidualBlock(64,3),
+            nnx.ReLU()
+        ])
+
+        self.res_block2 = nnx.Sequential([
+            ResidualBlock(128,3),
+            nnx.ReLU()
+        ])
+
+        self.conv_block = nnx.Sequential([
+            nnx.Conv(
+                features=64,
+                kernel_size=(kernel_size, kernel_size),
+                strides=(1, 1),
+                padding='SAME',
+                use_bias=True,
+            ),
+            nnx.ReLU()
+        ])
+
+        self.conv2 = nnx.Conv(
+            features=in_c,
+            kernel_size=(kernel_size, kernel_size),
+            strides=(1, 1),
+            padding='SAME',
+            use_bias=True,
+        )
+    
+    def call(self, x):
+        y = x 
+        o1 = self.conv1(x)
+        o2 = self.res_block1(o1)
+        o3 = self.res_block2(o2)
+        o4 = o1 + o2 + o3
+        o5 = self.conv2(o4)
+        o6 = self.conv2(o5)
+
+        return y - o6
