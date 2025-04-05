@@ -21,10 +21,6 @@ import dm_pix as pix
 import cv2 
 import albumentations as A
 
-#Tensorboard logging
-from tensorboardX import SummaryWriter
-
-from tqdm import tqdm
 import pyiqa
 
 import utils
@@ -64,6 +60,8 @@ class WaveletTransform(nnx.Module):
         h[:, :, 1::2, 0::2] = x1 - x2 + x3 - x4
         h[:, :, 0::2, 1::2] = x1 + x2 - x3 - x4
         h[:, :, 1::2, 1::2] = x1 + x2 + x3 + x4
+
+        return h
 
     # Discrete Wavelet Transform (from paper)
     def dwt(self, x):
@@ -181,7 +179,7 @@ class Net(nnx.Module):
         self.diffusion_model = DiffusionUNet(config)
         
         # Initialize the FGM model
-        self.fgm_model = FGM(in_features=3,out_features=64)
+        self.fgm_model = FGM(in_c=3,out_c=64)
 
         #Initialize the beta schedule
         betas = get_beta_schedule(
@@ -275,7 +273,7 @@ class Net(nnx.Module):
             maxval=self.num_timesteps
         )
         t2 = jnp.concat([t2, self.num_timesteps - t2 - 1],
-                      dim=0)[: input_h0.shape[0]].to(x.device)
+                      axis=0)[: input_h0.shape[0]].to(x.device)
         a2 = (1-b2).cumprod(dim=0).index_select(0, t2 + 1).view(-1, 1, 1, 1)
         e2 = jax.random.normal(subkey, input_h0.shape)
 
