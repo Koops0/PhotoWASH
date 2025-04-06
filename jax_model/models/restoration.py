@@ -6,7 +6,8 @@
 import jax
 import jax.numpy as jnp
 from flax import nnx
-import model.utils as utils
+
+import jax_model.utils as utils
 import os
 
 # Data transformation function
@@ -44,3 +45,21 @@ class DiffusiveRestoration:
             x_output = x_output[:, :, :h, :w]
 
             utils.logging.save_image(x_output, os.path.join(image_folder, f"{y[0]}.png"))
+
+    def restore_single_loader(self, val_loader):
+        image_folder = self.args.image_folder
+        for i, (x, y) in enumerate(val_loader):
+            x_cond = x[:, :3, :, :].to(self.diffusion.device)
+            b, c, h, w = x_cond.shape
+            img_h_32 = int(32 * jnp.ceil(h / 32.0))
+            img_w_32 = int(32 * jnp.ceil(w / 32.0))
+            x_cond = jnp.pad(x_cond, (0, img_w_32 - w, 0, img_h_32 - h), 'reflect')
+            x_output = self.diffusion(x_cond)
+            x_output = x_output[:, :, :h, :w]
+
+            utils.logging.save_image(x_output, os.path.join(image_folder, f"{y[0]}.png"))
+
+    # Restoration function
+    def diffusive_restoration(self, x_cond):
+        x_output = self.diffusion.Module(x_cond)
+        return x_output

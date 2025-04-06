@@ -1,2 +1,4 @@
-from models.ddm import *
-from models.restoration import *
+from .ddm import *
+from .restoration import *
+
+__all__ = ['DenoisingDiffusion', 'DiffusiveRestoration']

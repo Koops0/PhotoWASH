@@ -41,7 +41,21 @@ class DiffusiveRestoration:
                 base_name = os.path.splitext(y[0])[0]  # Removes .png
                 utils.logging.save_image(x_output, os.path.join(image_folder, f"{base_name}_restored.png"))
                 
-
+        def restore_single_loader(self, val_loader):
+            image_folder = self.args.image_folder
+            with torch.no_grad():
+                for i, (x, y) in enumerate(val_loader):
+                    x_cond = x[:, :3, :, :].to(self.diffusion.device)
+                    b, c, h, w = x_cond.shape
+                    img_h_32 = int(32 * np.ceil(h / 32.0))
+                    img_w_32 = int(32 * np.ceil(w / 32.0))
+                    x_cond = F.pad(x_cond, (0, img_w_32 - w, 0, img_h_32 - h), 'reflect')
+                    x_output = self.diffusive_restoration(x_cond)
+                    x_output = x_output[:, :, :h, :w]
+                    # x1 = x1[:, :, :h, :w]
+                    base_name = os.path.splitext(y[0])[0]  # Removes .png
+                    utils.logging.save_image(x_output, os.path.join(image_folder, f"{base_name}_restored.png"))
+    
     def diffusive_restoration(self, x_cond):
         x_output = self.diffusion.model(x_cond)
         return x_output["pred_x_2"]
