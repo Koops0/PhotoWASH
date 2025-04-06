@@ -14,7 +14,7 @@ from flax import nnx, traverse_util
 
 import pyiqa
 
-import jax_model.utils as utils
+from . import utilsrdm
 from jax_model.models.fgm_jax import FGM
 from jax_model.models.unet_jax import DiffusionUNet
 
@@ -37,7 +37,7 @@ class WaveletTransform(nnx.Module):
     # Inverse Wavelet Transform (from paper)
     def iwt(self, x):
         r = 2
-        in_batch, in_channel, in_height, in_width = x.size()
+        in_batch, in_channel, in_height, in_width = x.shape
         out_batch = int(in_batch / (r**2))
         out_channel, out_height, out_width = in_channel, r * in_height, r * in_width
         x1 = x[0:out_batch, :, :, :] / 2
@@ -45,12 +45,12 @@ class WaveletTransform(nnx.Module):
         x3 = x[out_batch * 2:out_batch * 3, :, :, :] / 2
         x4 = x[out_batch * 3:out_batch * 4, :, :, :] / 2
 
-        h = jnp.zeros([out_batch, out_channel, out_height, out_width]).float().to(x.device)
+        h = jnp.zeros([out_batch, out_channel, out_height, out_width], dtype=jnp.float32)
 
-        h[:, :, 0::2, 0::2] = x1 - x2 - x3 + x4
-        h[:, :, 1::2, 0::2] = x1 - x2 + x3 - x4
-        h[:, :, 0::2, 1::2] = x1 + x2 - x3 - x4
-        h[:, :, 1::2, 1::2] = x1 + x2 + x3 + x4
+        h = h.at[:, :, 0::2, 0::2].set(x1 - x2 - x3 + x4)
+        h = h.at[:, :, 1::2, 0::2].set(x1 - x2 + x3 - x4)
+        h = h.at[:, :, 0::2, 1::2].set(x1 + x2 - x3 - x4)
+        h = h.at[:, :, 1::2, 1::2].set(x1 + x2 + x3 + x4)
 
         return h
 
@@ -99,6 +99,14 @@ class EMAHelper(object):
     def __init__(self, mu=0.9999):
         self.mu = mu
         self.shadow = {}
+
+    def register_params(self, params):
+        """Register parameters directly instead of extracting from module"""
+        flat_params = traverse_util.flatten_dict(params)
+        self.shadow = {
+            "/".join(k): jnp.array(v) 
+            for k, v in flat_params.items()
+    }
 
     def register(self, module):
         flat_params = traverse_util.flatten_dict(module.params)
@@ -220,24 +228,24 @@ class Net(nnx.Module):
 
             xt_nhwc = jnp.transpose(xt, (0, 2, 3, 1))  # NCHW -> NHWC
             x_c_nhwc = jnp.transpose(x_c, (0, 2, 3, 1))  # NCHW -> NHWC
-            
+
             # Concatenate along the channel axis (last dimension in NHWC)
             model_input = jnp.concatenate([xt_nhwc, x_c_nhwc], axis=3)
-            
+
             # Run model and convert output back to NCHW
             et_nhwc = self.diffusion_model(model_input, t)
             et = jnp.transpose(et_nhwc, (0, 3, 1, 2))  # NHWC -> NCHW
-            
+
             # Continue with the rest of your code using et in NCHW format
             x0_t = (xt - et * jnp.sqrt(1 - at)) / jnp.sqrt(at)
 
 
-            c1 = eta * ((1 - at / at_next) * (1 - at_next) / (1 - at)).sqrt()
-            c2 = ((1 - at_next) - c1 ** 2).sqrt()
+            c1 = eta * jnp.sqrt((1 - at / at_next) * (1 - at_next) / (1 - at))
+            c2 = jnp.sqrt((1 - at_next) - c1 ** 2)
             
             key, subkey = jax.random.split(key)  # Get a new random key for this step
             noise = jax.random.normal(subkey, x.shape)  # Generate noise with the same shape as x
-            xt_next = at_next.sqrt() * x0_t + c1 * noise + c2 * et
+            xt_next = jnp.sqrt(at_next) * x0_t + c1 * noise + c2 * et
 
             xs.append(xt_next)
 
@@ -315,7 +323,9 @@ class Net(nnx.Module):
             pred_LL_list = self.sample_training(pred_x_LL, b1)
             pred_LL = pred_LL_list[-1]
 
+            pred_x_h0 = jnp.transpose(pred_x_h0, (0, 2, 3, 1))  # Convert NCHW to NHWC
             pred_x_h0 = self.fgm_model(pred_x_h0)
+            pred_x_h0 = jnp.transpose(pred_x_h0, (0, 3, 1, 2))
             pred_x_2 = idwt.iwt(jnp.concatenate([pred_LL, pred_x_h0], axis=0))
 
             # Append the results to the data dictionary
@@ -340,12 +350,7 @@ class DenoisingDiffusion (object):
         self.params = self.model(dummy_input, key=key)
 
         self.ema_helper = EMAHelper(mu=0.9999)
-        self.ema_helper.register(self.model)
-        self.ema_helper.update(self.model)
-        self.model.apply(self.params, dummy_input, key=key)
-        self.model = self.model.apply(self.params, dummy_input, key=key)
-        self.model = self.model.to(self.device)
-        
+        self.ema_helper.register_params(self.params)
         
         # Set up pmap for parallel processing
         self.pmapped_model_apply = jax.pmap(

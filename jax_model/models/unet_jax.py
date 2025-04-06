@@ -111,7 +111,7 @@ class Downsample(nnx.Module):
         
         if self.with_conv:
             #Use custom padding
-            pad = (0, 1, 0, 1)
+            pad = ((0,0),(0,1),(0,1),(0,0))
             x = jnp.pad(x, pad_width=pad, mode='constant', constant_values=0)
             x = self.conv(x)
         else:
@@ -236,21 +236,29 @@ class AttnBlock(nnx.Module):
         k = self.k(h)
         v = self.v(h)
 
-        # Now, we can compute the attention, via B(the batch size), 
-        # H (the height), W (the width), and C (the channels)
+        # Compute attention with proper JAX NHWC format
         B, H, W, C = h.shape
-        q = jnp.reshape(q, (B, C, H*W))
-        q = jnp.transpose(q, (0, 2, 1))
-        k = jnp.reshape(k, (B, C, H*W))
-        w_ = jax.lax.batch_matmul(q, k)
-        w_ = w_ * (int(C)**(-0.5))
-        w_ = nnx.softmax(w_, axis=2)
 
-        # values
-        v = jnp.reshape(v, (B, C, H*W))
-        w_ = jnp.transpose(w_, (0, 2, 1))
-        h_ = jax.lax.batch_matmul(v, w_)
-        h_ = jnp.reshape(h_, (B, C, H, W))
+        # Reshape q, k, v for attention computation (keeping NHWC format)
+        q = jnp.reshape(q, (B, H*W, C))  # Flatten spatial dimensions
+        k = jnp.reshape(k, (B, H*W, C))
+        v = jnp.reshape(v, (B, H*W, C))
+
+        # Transpose k for matrix multiplication
+        k = jnp.transpose(k, (0, 2, 1))  # B, C, H*W
+
+        # Compute attention scores
+        w_ = jnp.matmul(q, k)  # B, H*W, H*W
+        w_ = w_ * (int(C)**(-0.5))
+        w_ = nnx.softmax(w_, axis=-1)
+
+        # Apply attention weights to values
+        h_ = jnp.matmul(w_, v)  # B, H*W, C
+
+        # Reshape back to spatial format
+        h_ = jnp.reshape(h_, (B, H, W, C))  # Back to NHWC
+
+        # Apply projection and residual connection
         h_ = self.proj_out(h_)
 
         return h_ + x

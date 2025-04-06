@@ -7,8 +7,10 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-import jax_model.utils as utils
+from . import utilsrdm
 import os
+
+import torch
 
 # Data transformation function
 def data_transform(X):
@@ -36,12 +38,20 @@ class DiffusiveRestoration:
     def restore(self, val_loader):
         image_folder = os.path.join(self.args.image_folder, self.config.data.val_dataset)
         for i, (x, y) in enumerate(val_loader):
-            x_cond = x[:, :3, :, :].to(self.diffusion.device)
+            if isinstance(x, torch.Tensor):
+                x = jnp.array(x.cpu().numpy())
+        
+            x_cond = x[:, :3, :, :]
             b, c, h, w = x_cond.shape
             img_h_32 = int(32 * jnp.ceil(h / 32.0))
             img_w_32 = int(32 * jnp.ceil(w / 32.0))
-            x_cond = jnp.pad(x_cond, (0, img_w_32 - w, 0, img_h_32 - h), 'reflect')
-            x_output = self.diffusion(x_cond)
+            x_cond = jnp.pad(x_cond, 
+                ((0, 0),           # Batch dimension: no padding
+                 (0, 0),           # Channel dimension: no padding
+                 (0, img_h_32 - h),  # Height dimension: pad after
+                 (0, img_w_32 - w)),  # Width dimension: pad after
+                mode='reflect')
+            x_output = self.diffusion.model.sample_training(x_cond, self.diffusion.model.betas)[-1]
             x_output = x_output[:, :, :h, :w]
 
             utils.logging.save_image(x_output, os.path.join(image_folder, f"{y[0]}.png"))

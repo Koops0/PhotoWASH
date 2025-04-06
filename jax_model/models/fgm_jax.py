@@ -35,7 +35,8 @@ class ResidualBlock(nnx.Module):
 
         #Dense layers
         self.layers = [
-            Dense(in_c, growth_rate, kernel_size) for i in range(layers)
+            Dense(in_c + i * growth_rate, growth_rate, kernel_size) 
+            for i in range(layers)
         ]
 
         self.lff = nnx.Conv(
@@ -46,12 +47,15 @@ class ResidualBlock(nnx.Module):
         )
 
     def __call__(self, x, lrl=True):
+        features = x
+        for layer in self.layers:
+            features = layer(features)
+        
         #if local residual learning is enabled, add the input to the output
         if lrl:
-            features = self.layers(x) 
             x = x + self.lff(features)
         else:
-            x = self.layers(x)
+            x = features
         
         return x
 
@@ -66,25 +70,15 @@ class FGM(nnx.Module):
             rngs=RNG
         )
 
-        self.res_block1 = nnx.Sequential([
-            ResidualBlock(64,64,3),
-            nnx.relu
-        ])
+        self.res_block1 = ResidualBlock(64, 64, 3)
+        self.res_block2 = ResidualBlock(64, 64, 3)
 
-        self.res_block2 = nnx.Sequential([
-            ResidualBlock(64,64,3),
-            nnx.relu
-        ])
-
-        self.conv_block = nnx.Sequential([
-            nnx.Conv(
+        self.conv_block = nnx.Conv(
                 in_features=64,
                 out_features=64,
                 kernel_size=(5,5),
                 rngs=RNG
             ),
-            nnx.relu
-        ])
 
         self.conv2 = nnx.Conv(
             in_features=out_c,
@@ -97,9 +91,12 @@ class FGM(nnx.Module):
         y = x 
         o1 = self.conv1(x)
         o2 = self.res_block1(o1)
+        o2 = nnx.relu(o2)
         o3 = self.res_block2(o2)
+        o3 = nnx.relu(o3)
         o4 = o1 + o2 + o3
-        o5 = self.conv2(o4)
+        o5 = self.conv_block[0](o4)
+        o5 = nnx.relu(o5)
         o6 = self.conv2(o5)
 
         return y - o6
