@@ -14,9 +14,9 @@ from flax import nnx, traverse_util
 
 import pyiqa
 
-import model.utils as utils
-from models.fgm_jax import FGM
-from models.unet_jax import DiffusionUNet
+import jax_model.utils as utils
+from jax_model.models.fgm_jax import FGM
+from jax_model.models.unet_jax import DiffusionUNet
 
 # Frequency and Wavelet transforms
 class FrequencyTransform(nnx.Module):
@@ -184,9 +184,13 @@ class Net(nnx.Module):
 
     #Compute alpha
     def compute_alpha(self, beta, t):
-        beta = jnp.concat([jnp.zeros(1).to(beta.device)], axis=0)
-        alpha = (1 - beta).cumprod(dim=0).index_select(0, t + 1).view(-1, 1, 1, 1)
-        return alpha
+        # Add leading zero without device handling
+        beta_with_zero = jnp.concatenate([jnp.zeros(1), beta], axis=0)
+        # Cumulative product along axis 0
+        alpha_cumprod = jnp.cumprod(1 - beta_with_zero, axis=0)
+        # Index by t+1 and reshape
+        alpha_selected = jnp.take(alpha_cumprod, t + 1)
+        return jnp.reshape(alpha_selected, (-1, 1, 1, 1))
     
     # Sample training fn
     def sample_training(self, x_c, b, dm_num=True, eta=0.):
@@ -208,14 +212,25 @@ class Net(nnx.Module):
         xs = [x]
 
         for i, j in zip(reversed(seq), reversed(seq_next)) if dm_num else zip(reversed(seq_1), reversed(seq_next_1)):
-            t = (jnp.ones(n) * i).to(x.device)
-            next_t = (jnp.ones(n) * j).to(x.device)
-            at = self.compute_alpha(b, t.long())
-            at_next = self.compute_alpha(b, next_t.long())
-            xt = xs[-1].to(x.device)
+            t = jnp.ones(n, dtype=jnp.int32) * i
+            next_t = jnp.ones(n, dtype=jnp.int32) * j
+            at = self.compute_alpha(b, t)
+            at_next = self.compute_alpha(b, next_t)
+            xt = xs[-1]
 
-            et = self.diffusion_model(jnp.concat([xt, x_c], axis=1), t)
-            x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
+            xt_nhwc = jnp.transpose(xt, (0, 2, 3, 1))  # NCHW -> NHWC
+            x_c_nhwc = jnp.transpose(x_c, (0, 2, 3, 1))  # NCHW -> NHWC
+            
+            # Concatenate along the channel axis (last dimension in NHWC)
+            model_input = jnp.concatenate([xt_nhwc, x_c_nhwc], axis=3)
+            
+            # Run model and convert output back to NCHW
+            et_nhwc = self.diffusion_model(model_input, t)
+            et = jnp.transpose(et_nhwc, (0, 3, 1, 2))  # NHWC -> NCHW
+            
+            # Continue with the rest of your code using et in NCHW format
+            x0_t = (xt - et * jnp.sqrt(1 - at)) / jnp.sqrt(at)
+
 
             c1 = eta * ((1 - at / at_next) * (1 - at_next) / (1 - at)).sqrt()
             c2 = ((1 - at_next) - c1 ** 2).sqrt()
@@ -224,12 +239,12 @@ class Net(nnx.Module):
             noise = jax.random.normal(subkey, x.shape)  # Generate noise with the same shape as x
             xt_next = at_next.sqrt() * x0_t + c1 * noise + c2 * et
 
-            xs.append(xt_next.to(x.device))
+            xs.append(xt_next)
 
         return xs
 
 
-    def __call__(self, x):
+    def __call__(self, x, key=None):
         if key is None:
             key = jax.random.PRNGKey(0)
 

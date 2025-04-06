@@ -18,24 +18,59 @@ def get_timestep_embedding(timesteps, embedding_dim):
     half_dim = embedding_dim // 2
     emb = math.log(10000) / (half_dim - 1)
     emb = jnp.exp(jnp.arange(half_dim) * -emb)
-    emb = emb.to(device=timesteps.device)
-    emb = timesteps.float()[:, None] * emb[None, :]
+    
+    # Convert timesteps to float32
+    timesteps_float = jnp.asarray(timesteps, dtype=jnp.float32)
+    
+    # Create embeddings
+    emb = timesteps_float[:, None] * emb[None, :]
     emb = jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=1)
+    
+    # Add padding for odd dimensions
     if embedding_dim % 2 == 1:
-        # Padding
-        emb = jnp.concatenate([emb, jnp.zeros((timesteps.shape[0], 1), device=timesteps.device)], axis=1)
+        # Create zeros without device specification
+        padding = jnp.zeros((timesteps.shape[0], 1))
+        emb = jnp.concatenate([emb, padding], axis=1)
+        
     return emb
 
 def nonlinearity(x):
     return x*jax.nn.sigmoid(x)
 
+class NNXGroupNorm(nnx.Module):
+    def __init__(self, in_features, num_groups=32, epsilon=1e-5):
+        super().__init__()
+        self.num_groups = num_groups
+        self.epsilon = epsilon
+        self.in_features = in_features
+        
+        # Define parameters for scale and bias
+        self.scale = nnx.Param(jnp.ones(in_features))
+        self.bias = nnx.Param(jnp.zeros(in_features))
+    
+    def __call__(self, x):
+        # Reshape for group normalization: (batch, height, width, channels) -> 
+        orig_shape = x.shape
+        group_shape = x.shape[:-1] + (self.num_groups, x.shape[-1] // self.num_groups)
+        x = x.reshape(group_shape)
+        
+        # Calculate mean and variance across spatial dims and group features
+        mean = jnp.mean(x, axis=(1, 2, 4), keepdims=True)
+        var = jnp.var(x, axis=(1, 2, 4), keepdims=True)
+        
+        # Normalize
+        x = (x - mean) / jnp.sqrt(var + self.epsilon)
+        
+        # Reshape back
+        x = x.reshape(orig_shape)
+        
+        # Apply scale and bias
+        scale = self.scale.reshape((1, 1, 1, -1))
+        bias = self.bias.reshape((1, 1, 1, -1))
+        return x * scale + bias
+
 def normalize(in_c):
-    return linen.GroupNorm(
-        num_groups=32,
-        epsilon=1e-6,
-        axis=-1,
-        use_bias=False,
-    )(in_c)
+    return NNXGroupNorm(in_features=in_c)
 
 class Upsample(nnx.Module):
     def __init__(self, in_c, with_conv):
@@ -116,7 +151,7 @@ class ResBlock(nnx.Module):
         )
 
         #if in_c != out_c:
-        if self.in_c != out_c:
+        if self.in_c != self.out_c:
             if self.use_conv_shortcut:
                 self.shortcut = nnx.Conv(
                     in_features=in_c,
@@ -132,6 +167,9 @@ class ResBlock(nnx.Module):
                     padding='VALID',
                     rngs=RNG,
                 )
+        else:
+            # Identity shortcut when dimensions match
+            self.shortcut = lambda x: x
     
     def __call__(self, x, temb):
         #Layer 1
@@ -141,7 +179,7 @@ class ResBlock(nnx.Module):
         h = self.conv1(h)
 
         #Apply temb
-        h = h + self.temb_proj(nonlinearity(temb))[:, :, None, None]
+        h = h + self.temb_proj(nonlinearity(temb))[:, None, None, :]  # NHWC style (JAX)
 
         #Layer 2
         h = self.norm2(h)

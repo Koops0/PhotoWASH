@@ -9,15 +9,15 @@ import yaml
 import jax
 import jax.numpy as jnp  # Replace torch with jax
 import numpy as np
-import datasets
+from model import datasets
 # Now use explicit import path
 from jax_model.models import DenoisingDiffusion, DiffusiveRestoration
 from tqdm import tqdm
 
 def parse_args_and_config():
     parser = argparse.ArgumentParser(description='Evaluate Image restoration tasks')
-    parser.add_argument("--config", default='', type=str,
-                        help="Path to the config file")
+    parser.add_argument("--config", required=True, type=str,
+                    help="Path to the config file")
     parser.add_argument('--resume', default='', type=str,
                         help='Path for the diffusion model checkpoint to load for evaluation')
     parser.add_argument("--sampling_timesteps", type=int, default=10,
@@ -28,10 +28,17 @@ def parse_args_and_config():
                         help='Seed for initializing training (default: 230)')
     args = parser.parse_args()
 
-    with open(os.path.join("configs", args.config), "r") as f:
+    # Use script directory to find configs folder
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, "configs", args.config)
+    
+    if not os.path.exists(config_path):
+        raise ValueError(f"Config file not found: '{config_path}'")
+        
+    with open(config_path, "r") as f:
         config = yaml.safe_load(f)
     new_config = dict2namespace(config)
-
+    
     return args, new_config
 
 
@@ -62,7 +69,7 @@ def main():
     key, subkey = jax.random.split(key)
     
     # Set numpy random seed for dataset operations
-    jnp.random.seed(args.seed)
+    np.random.seed(args.seed)
     
     # data loading - dataset code remains the same
     print(f"Current Task '{config.data.task}'")
