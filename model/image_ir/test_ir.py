@@ -1,18 +1,22 @@
 import argparse
 import os
 import sys
-sys.path.insert(0, "../")
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from jax_model.models import DiffusiveRestoration, DenoisingDiffusion
+
+# Replace torch with jax imports
 import yaml
-import torch
-import torch.backends.cudnn as cudnn
+import jax
+import jax.numpy as jnp
 import numpy as np
 import datasets
-from models import DenoisingDiffusion, DiffusiveRestoration
 from tqdm import tqdm
 
 def parse_args_and_config():
     parser = argparse.ArgumentParser(description='Evaluate Image restoration tasks')
-    parser.add_argument("--config", default='', type=str,
+    parser.add_argument("--config", required=True, type=str,
                         help="Path to the config file")
     parser.add_argument('--resume', default='', type=str,
                         help='Path for the diffusion model checkpoint to load for evaluation')
@@ -24,55 +28,18 @@ def parse_args_and_config():
                         help='Seed for initializing training (default: 230)')
     args = parser.parse_args()
 
-    with open(os.path.join("configs", args.config), "r") as f:
+    # Use current script directory to find configs folder
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, "configs", args.config)
+    
+    if not os.path.exists(config_path):
+        raise ValueError(f"Config file not found: '{config_path}'")
+    
+    if os.path.isdir(config_path):
+        raise ValueError(f"Config path '{config_path}' is a directory, not a file. Please specify a config file.")
+        
+    with open(config_path, "r") as f:
         config = yaml.safe_load(f)
     new_config = dict2namespace(config)
 
     return args, new_config
-
-
-def dict2namespace(config):
-    namespace = argparse.Namespace()
-    for key, value in config.items():
-        if isinstance(value, dict):
-            new_value = dict2namespace(value)
-        else:
-            new_value = value
-        setattr(namespace, key, new_value)
-    return namespace
-
-
-def main():
-    args, config = parse_args_and_config()
-
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    print("Current device: {}".format(device))
-    if torch.cuda.is_available():
-       current_gpu = torch.cuda.current_device()
-       gpu_name = torch.cuda.get_device_name(current_gpu)
-       print("Current GPU: {} - {}".format(current_gpu, gpu_name))
-    config.device = device
-
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
-    torch.backends.cudnn.benchmark = True
-
-    # data loading
-    print("Current Task '{}'".format(config.data.task))
-    print("Current dataset '{}'".format(config.data.val_dataset))
-    DATASET = datasets.__dict__[config.data.type](config)
-    _, val_loader = DATASET.get_loaders()
-
-    # limit testing to 20 images from the validation set
-    val_loader.dataset.input_names = val_loader.dataset.input_names[:20]
-    
-    diffusion = DenoisingDiffusion(args, config)
-    model = DiffusiveRestoration(diffusion, args, config)
-    # model = nn.DataParallel(model)
-    val_loader_with_progress = tqdm(val_loader, desc='Loading Validation Data', leave=False)
-    model.restore(val_loader_with_progress)
-
-if __name__ == '__main__':
-    main()

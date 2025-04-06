@@ -1,29 +1,20 @@
 # DDM paper code by Minglong Xue, Jinhong He, Shivakumara Palaiahnakote, Mingliang Zhou
-# This is a JAX implementation of the Diffusion model, which is used in the diffusion model.
+# This is a JAX implementation of the Denoising Diffusion model, which is used in the diffusion model.
 # Translated by Kershan A.
 # 4/6/25
-
 
 #General imports
 import os
 import numpy as np
-import math
-import time
 
 #JAX + Flax imports
 import jax
 import jax.numpy as jnp
 from flax import nnx, traverse_util
-from flax.training import train_state
-import optax
-import dm_pix as pix
-
-import cv2 
-import albumentations as A
 
 import pyiqa
 
-import utils
+import model.utils as utils
 from models.fgm_jax import FGM
 from models.unet_jax import DiffusionUNet
 
@@ -239,9 +230,13 @@ class Net(nnx.Module):
 
 
     def __call__(self, x):
+        if key is None:
+            key = jax.random.PRNGKey(0)
+
         data_dict = {}
         dwt, idwt = WaveletTransform(), WaveletTransform()
 
+        # Extract input image
         input_img = x[:, :3, :, :]
         n, c, h, w = input_img.shape
         input_img_norm = data_transform(input_img)
@@ -249,22 +244,27 @@ class Net(nnx.Module):
 
         input_LL, input_h0 = input_dwt[:n, :, :, :], input_dwt[n:, :, :, :]
 
-        b = self.betas.to(input_img.device)
+        b = self.betas  # No device handling needed in JAX
 
-        b1 = self.betas.to(input_LL.device)
-        key, subkey = jax.random.split(key)  # Get a new random key
+        b1 = self.betas  # No device handling needed in JAX
+        key, subkey = jax.random.split(key)
         t1 = jax.random.randint(
             subkey, 
             shape=(input_LL.shape[0] // 2 + 1,), 
             minval=0, 
             maxval=self.num_timesteps
         )
-        t1 = jnp.concat([t1, self.num_timesteps - t1 - 1],
-                      dim=0)[: input_LL.shape[0]].to(x.device)
-        a1 = (1-b1).cumprod(dim=0).index_select(0, t1 + 1).view(-1, 1, 1, 1)
+        # Concatenate and slice
+        t1 = jnp.concatenate([t1, self.num_timesteps - t1 - 1], axis=0)[:input_LL.shape[0]]
+
+        # Replace cumprod and index_select with JAX operations
+        alpha_cumprod = jnp.cumprod(1 - b1, axis=0)
+        a1 = jnp.reshape(alpha_cumprod[t1 + 1], (-1, 1, 1, 1))
+
+        key, subkey = jax.random.split(key)
         e1 = jax.random.normal(subkey, input_LL.shape)
 
-        b2 = self.betas.to(input_LL.device)
+        b2 = self.betas
         key, subkey = jax.random.split(key)
         t2 = jax.random.randint(
             subkey, 
@@ -272,32 +272,43 @@ class Net(nnx.Module):
             minval=0, 
             maxval=self.num_timesteps
         )
-        t2 = jnp.concat([t2, self.num_timesteps - t2 - 1],
-                      axis=0)[: input_h0.shape[0]].to(x.device)
-        a2 = (1-b2).cumprod(dim=0).index_select(0, t2 + 1).view(-1, 1, 1, 1)
+        t2 = jnp.concatenate([t2, self.num_timesteps - t2 - 1], axis=0)[:input_h0.shape[0]]
+
+        # Similar JAX-style operations for a2
+        alpha_cumprod2 = jnp.cumprod(1 - b2, axis=0)
+        a2 = jnp.reshape(alpha_cumprod2[t2 + 1], (-1, 1, 1, 1))
+
+        key, subkey = jax.random.split(key)
         e2 = jax.random.normal(subkey, input_h0.shape)
 
-        #Sample training conditional
-        if self.training==False:
+        # Use is_training flag instead of .training attribute
+        # Typically passed through apply() in JAX/Flax
+        is_training = False  # You may want to pass this as an argument
+
+        if not is_training:
             img_list = self.sample_training(input_img, b)
             pred_x = img_list[-1]
 
+            key, subkey = jax.random.split(key)
             pred_x_list_1 = self.sample_training(pred_x, b2)
             pred_x_1 = pred_x_list_1[-1]
 
             pred_x_dwt = dwt.dwt(pred_x_1)
             pred_x_LL, pred_x_h0 = pred_x_dwt[:n, :, :, :], pred_x_dwt[n:, :, :, :]
+
+            key, subkey = jax.random.split(key)
             pred_LL_list = self.sample_training(pred_x_LL, b1)
             pred_LL = pred_LL_list[-1]
+
             pred_x_h0 = self.fgm_model(pred_x_h0)
-            pred_x_2 = idwt.iwt(jnp.concat([pred_LL, pred_x_h0], axis=0))
+            pred_x_2 = idwt.iwt(jnp.concatenate([pred_LL, pred_x_h0], axis=0))
 
             # Append the results to the data dictionary
             data_dict["pred_x"] = pred_x
             data_dict["pred_x_1"] = pred_x_1
             data_dict['pred_x_2'] = pred_x_2
 
-            return data_dict
+        return data_dict
         
 # Class for denoising diffusion
 class DenoisingDiffusion (object):
@@ -311,19 +322,50 @@ class DenoisingDiffusion (object):
         
         key = jax.random.PRNGKey(0)
         dummy_input = jnp.ones((1, 3, 256, 256))  # Adjust shape as needed
-        self.params = self.model.init(key, dummy_input)
+        self.params = self.model(dummy_input, key=key)
 
+        self.ema_helper = EMAHelper(mu=0.9999)
+        self.ema_helper.register(self.model)
+        self.ema_helper.update(self.model)
+        self.model.apply(self.params, dummy_input, key=key)
+        self.model = self.model.apply(self.params, dummy_input, key=key)
+        self.model = self.model.to(self.device)
+        
+        
+        # Set up pmap for parallel processing
         self.pmapped_model_apply = jax.pmap(
-            lambda params, x: self.model.apply(params, x),
+            lambda model, x, key: model(x, key=key),
             axis_name='devices'
         )
 
     def load_ddm_ckpt(self, load_path, ema=False):
         checkpoint = utils.logging.load_checkpoint(load_path, None)
-        self.model.load_state_dict(checkpoint['state_dict'], strict=True)
-        self.ema_helper.load_state_dict(checkpoint['ema_helper'])
-        if ema:
-            self.ema_helper.ema(self.model)
-        print("Load checkpoint: ", os.path.exists(load_path))
-        print("Current checkpoint: {}".format(load_path))
         
+        # In JAX/nnx, parameters are part of the model object itself
+        # We need a custom loading mechanism
+        if 'state_dict' in checkpoint:
+            # Convert checkpoint to nnx model parameters
+            self._load_parameters_from_checkpoint(checkpoint['state_dict'])
+        
+        # Load EMA helper state
+        if 'ema_helper' in checkpoint and hasattr(self, 'ema_helper'):
+            self.ema_helper.load_state_dict(checkpoint['ema_helper'])
+        
+        # Apply EMA if requested
+        if ema and hasattr(self, 'ema_helper'):
+            self.model, ema_params = self.ema_helper.ema_copy(self.model)
+            
+        print(f"Loaded checkpoint from: {load_path}")
+        print(f"Checkpoint exists: {os.path.exists(load_path)}")
+    
+    def _load_parameters_from_checkpoint(self, state_dict):
+        # Flatten the state_dict for easier access
+        flat_params = traverse_util.flatten_dict(state_dict)
+        
+        # Unflatten and assign to model parameters
+        for name, param in flat_params.items():
+            key = "/".join(name)
+            if key in self.params:
+                self.params[key] = param
+            else:
+                print(f"Warning: Key {key} not found in model parameters.")

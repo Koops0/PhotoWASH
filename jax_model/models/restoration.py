@@ -6,7 +6,7 @@
 import jax
 import jax.numpy as jnp
 from flax import nnx
-import utils
+import model.utils as utils
 import os
 
 # Data transformation function
