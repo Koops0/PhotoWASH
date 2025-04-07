@@ -92,7 +92,35 @@ def data_transform(X):
 
 
 def inverse_data_transform(X):
-    return jnp.clamp((X + 1.0) / 2.0, 0.0, 1.0)
+    return jnp.clip((X + 1.0) / 2.0, 0.0, 1.0)
+
+
+def save_jax_array_as_image(img_array, filepath):
+    """Save a JAX array directly to an image file without using PyTorch."""
+    # Ensure proper normalization
+    if img_array.max() > 1.0 or img_array.min() < 0.0:
+        print(f"Warning: Image values outside [0,1] range: min={img_array.min()}, max={img_array.max()}")
+        img_array = jnp.clip(img_array, 0.0, 1.0)
+    
+    # Convert to numpy
+    img_np = np.array(img_array)
+    
+    # Handle batch dimension if present
+    if len(img_np.shape) == 4:
+        img_np = img_np[0]  # Take first image from batch
+        
+    # Convert from NCHW to HWC format for PIL
+    img_np = np.transpose(img_np, (1, 2, 0))
+    
+    # Scale to 0-255 range for PIL
+    img_np = (img_np * 255.0).astype(np.uint8)
+    
+    # Create directory if needed
+    os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+    
+    # Save with PIL
+    Image.fromarray(img_np).save(filepath)
+    print(f"Saved image to {filepath}")
         
 #EMA Helper. The Exponential Moving Average (EMA) is used to smooth the model weights during training.
 class EMAHelper(object):
@@ -201,7 +229,7 @@ class Net(nnx.Module):
         return jnp.reshape(alpha_selected, (-1, 1, 1, 1))
     
     # Sample training fn
-    def sample_training(self, x_c, b, dm_num=True, eta=0.):
+    def sample_training(self, x_c, b, dm_num=True, eta=0.0):
         # Skip and sequence
         skip = self.config.diffusion.num_diffusion_timesteps // self.args.sampling_timesteps
         seq = range(0, self.config.diffusion.num_diffusion_timesteps, skip)
@@ -216,7 +244,8 @@ class Net(nnx.Module):
         seq_next_1 = [-1] + list(seq[:-1])
 
         key = jax.random.PRNGKey(0)
-        x = jax.random.normal(key, (n, c, h, w))
+        key, subkey = jax.random.split(key)
+        x = jax.random.normal(subkey, (n, c, h, w))
         xs = [x]
 
         for i, j in zip(reversed(seq), reversed(seq_next)) if dm_num else zip(reversed(seq_1), reversed(seq_next_1)):
@@ -225,30 +254,41 @@ class Net(nnx.Module):
             at = self.compute_alpha(b, t)
             at_next = self.compute_alpha(b, next_t)
             xt = xs[-1]
-
+            
+            # Debug info for tracking sampling progress
+            if i % 100 == 0:
+                print(f"Sampling timestep {i}, at={at.mean()}, image stats: min={xt.min()}, max={xt.max()}")
+            
+            # Prepare model input with careful normalization
             xt_nhwc = jnp.transpose(xt, (0, 2, 3, 1))  # NCHW -> NHWC
             x_c_nhwc = jnp.transpose(x_c, (0, 2, 3, 1))  # NCHW -> NHWC
-
-            # Concatenate along the channel axis (last dimension in NHWC)
+            
+            # Concatenate along the channel axis
             model_input = jnp.concatenate([xt_nhwc, x_c_nhwc], axis=3)
-
+            
             # Run model and convert output back to NCHW
             et_nhwc = self.diffusion_model(model_input, t)
             et = jnp.transpose(et_nhwc, (0, 3, 1, 2))  # NHWC -> NCHW
-
-            # Continue with the rest of your code using et in NCHW format
-            x0_t = (xt - et * jnp.sqrt(1 - at)) / jnp.sqrt(at)
-
-
+            
+            # Improved numerical stability in the x0 prediction
+            sqrt_at = jnp.sqrt(at)
+            sqrt_1_minus_at = jnp.sqrt(1 - at)
+            x0_t = (xt - et * sqrt_1_minus_at) / sqrt_at.clip(min=1e-5)  # Add clipping for stability
+            
+            # Apply deterministic or stochastic sampling
             c1 = eta * jnp.sqrt((1 - at / at_next) * (1 - at_next) / (1 - at))
             c2 = jnp.sqrt((1 - at_next) - c1 ** 2)
             
-            key, subkey = jax.random.split(key)  # Get a new random key for this step
-            noise = jax.random.normal(subkey, x.shape)  # Generate noise with the same shape as x
+            # For low-noise sampling, use a very small eta
+            if eta > 0:
+                key, subkey = jax.random.split(key)
+                noise = jax.random.normal(subkey, x.shape)
+            else:
+                noise = jnp.zeros_like(x)
+                
             xt_next = jnp.sqrt(at_next) * x0_t + c1 * noise + c2 * et
-
             xs.append(xt_next)
-
+        
         return xs
 
 
@@ -359,7 +399,7 @@ class DenoisingDiffusion (object):
         )
 
     def load_ddm_ckpt(self, load_path, ema=False):
-        checkpoint = utils.logging.load_checkpoint(load_path, None)
+        checkpoint = utilsrdm.saving.load_checkpoint(load_path, None)
         
         # In JAX/nnx, parameters are part of the model object itself
         # We need a custom loading mechanism
